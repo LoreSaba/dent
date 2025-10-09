@@ -11,7 +11,7 @@ typedef enum {
 
 	TOKEN_STRING, TOKEN_NUMBER,
 
-	//TOKEN_WHITESPACE, TOKEN_NEWLINE,
+	TOKEN_WHITESPACE, TOKEN_NEWLINE,
 
 	TOKEN_IDENTIFIER,
 
@@ -106,25 +106,6 @@ bool isAlpha(char c) {
 		c == '_';
 }
 
-/* Skip the whitespace character pointed by the scanner. */ 
-void skipWhitespace(void) {
-	while(1) {
-		char c = peek();
-		switch(c) {
-		case ' ':
-		case '\r':
-		case '\t':
-			advanceScan();
-			break;
-		case '\n':
-			scanner.lineno++;
-			advanceScan();
-			break;
-		default: return;
-		}
-	}
-}
-
 /* Create a token with the specified token type. */
 Token makeToken(TokenType type) {
 	Token token;
@@ -148,6 +129,24 @@ Token makeErrorToken(const char *message) {
 
 	return token;
 }
+
+/* Create a whitespace token. */
+Token whitespace(void) {
+	while (!isAtEnd()) {
+		char c = peek();
+		switch(c) {
+		case ' ':
+		case '\r':
+		case '\t':
+			advanceScan();
+			break;
+		default: 
+			return makeToken(TOKEN_WHITESPACE);
+		}
+	}
+	return makeToken(TOKEN_WHITESPACE);
+}
+
 
 /* Create a string token. */
 Token string(void) {
@@ -243,8 +242,6 @@ Token identifier(void) {
 
 /* Return the next token pointed by the scanner. */
 Token scanToken(void) {
-	skipWhitespace();
-
 	scanner.start = scanner.curr;
 
 	if (isAtEnd()) return makeToken(TOKEN_EOF);
@@ -266,6 +263,13 @@ Token scanToken(void) {
 	case ':': return makeToken(TOKEN_COLON);
 	case ',': return makeToken(TOKEN_COMMA);
 	case '"': return string();
+	case ' ':
+	case '\r':
+	case '\t':
+		  return whitespace();
+	case '\n':
+		  scanner.lineno++;
+		  return makeToken(TOKEN_NEWLINE);
 	}
 
 	return makeErrorToken("Unexpected character");
@@ -273,6 +277,7 @@ Token scanToken(void) {
 
 /* Print token to the stdin. */
 void printToken(Token token) {
+	/* Print the line number
 	static int lineno = 0;
 
 	if (token.lineno > lineno) {
@@ -280,6 +285,7 @@ void printToken(Token token) {
 		lineno = token.lineno;
 	} else
 		printf(" | ");
+	*/
 		
 	switch(token.type) {
 	case TOKEN_LCURLY_BRACKET:
@@ -298,6 +304,8 @@ void printToken(Token token) {
 	case TOKEN_COMMA: 	printf("%s ", "TOKEN_COMMA");	break;
 	case TOKEN_STRING:  	printf("%s ", "TOKEN_STRING");	break;
 	case TOKEN_NUMBER: 	printf("%s ", "TOKEN_NUMBER");	break;
+	case TOKEN_WHITESPACE:	printf("%s ", "TOKEN_WHITESPACE");break;
+	case TOKEN_NEWLINE:	printf("%s ", "TOKEN_NEWLINE");	break;
 	case TOKEN_IDENTIFIER: 	printf("%s ", "TOKEN_IDENTIFIER");break;
 	case TOKEN_TRUE: 	printf("%s ", "TOKEN_TRUE");	break;
 	case TOKEN_FALSE: 	printf("%s ", "TOKEN_FALSE");	break;
@@ -494,6 +502,9 @@ void advancePars(void) {
 
 	while (1) {
 		parser.curr = scanToken();
+		if (parser.curr.type == TOKEN_WHITESPACE ||
+		    parser.curr.type == TOKEN_NEWLINE) continue;
+
 		if (parser.curr.type != TOKEN_ERROR) break;
 
 		errorAtCurrent(parser.curr.start);
