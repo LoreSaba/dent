@@ -30,6 +30,13 @@ typedef struct {
 	int lineno;
 } Token;
 
+/* Represent a dynamic array of tokens. */
+typedef struct {
+	int count;
+	int capacity;
+	Token *tokens;
+} TokenArray;
+
 /* Represent the component that get in input the content of a source file and 
  * produce in output the tokens. */
 typedef struct {
@@ -104,6 +111,22 @@ bool isAlpha(char c) {
 	return (c >= 'a' && c <= 'z') ||
 	       (c >= 'A' && c <= 'Z') ||
 		c == '_';
+}
+
+/* Initialize and allocate memory for the dinamic array of tokens. */
+void initTokenArray(TokenArray *a) {
+	a->count = 0;
+	a->capacity = 8;
+	a->tokens = malloc(sizeof(Token) * a->capacity);
+}
+
+/* Add a token t into token list l. */
+void addToken(TokenArray *a, Token t) {
+	if (a->count >= a->capacity) {
+		a->capacity *= 2;
+		a->tokens = realloc(a->tokens, sizeof(Token) * a->capacity);
+	}
+	a->tokens[a->count++] = t;
 }
 
 /* Create a token with the specified token type. */
@@ -275,6 +298,18 @@ Token scanToken(void) {
 	return makeErrorToken("Unexpected character");
 }
 
+/* Return the token list generated from the starting source of the scanner. */
+TokenArray scanTokens(void) {
+	TokenArray a;
+	initTokenArray(&a);
+
+	while (1) {
+		Token t = scanToken();
+		addToken(&a, t);
+		if (t.type == TOKEN_EOF) return a;
+	}
+}
+
 /* Print token to the stdin. */
 void printToken(Token token) {
 	/* Print the line number
@@ -320,6 +355,12 @@ void printToken(Token token) {
 	printf(" %d\n", token.len);
 }
 
+/* Print array of token to the stdin. */
+void printTokens(TokenArray *a) {
+	for (int i = 0; i < a->count; i++)
+		printToken(a->tokens[i]);
+}
+
 /* ========== AST ========== */
 
 /* Represent a concept in the most of programming languages. */
@@ -336,47 +377,58 @@ typedef enum {
 } NodeType;
 
 typedef struct Node Node;
-typedef struct NodeList NodeList;
-typedef struct KeyValue KeyValue;
 
 /* Dinamic array of nodes. */
-struct NodeList {
+typedef struct {
 	int count;
 	int capacity;
 	Node **nodes;
-};
+} NodeArray;
 
-struct KeyValue {
+
+typedef struct {
+	NodeArray elemArray;
+	Token *start;
+	Token *end;
+} Array;
+
+typedef struct {
+	NodeArray elemArray;
+	Token *start;
+	Token *end;
+} Block;
+
+typedef struct {
 	Node  *key;
 	Node  *value;	
-};
+} KeyValue;
 
 /* Represent a single node of the AST. */
 struct Node {
 	NodeType type;
 
 	union {
-		NodeList block;
-		NodeList array;
-		KeyValue keyvalue;
-		Token    literal;
+		Block     block;
+		Array     array;
+		KeyValue  keyvalue;
+		Token     *literal;
 	};
 };
 
 /* Initialize and allocate memory for the dinamic array of nodes. */
-void initNodeList(NodeList *l) {
-	l->count = 0;
-	l->capacity = 8;
-	l->nodes = malloc(sizeof(Node*) * l->capacity);
+void initNodeArray(NodeArray *a) {
+	a->count = 0;
+	a->capacity = 8;
+	a->nodes = malloc(sizeof(Node*) * a->capacity);
 }
 
 /* Add a node n into node list l. */
-void addNode(NodeList *l, Node *n) {
-	if (l->count >= l->capacity) {
-		l->capacity *= 2;
-		l->nodes = realloc(l->nodes, sizeof(Node*) * l->capacity);
+void addNode(NodeArray *a, Node *n) {
+	if (a->count >= a->capacity) {
+		a->capacity *= 2;
+		a->nodes = realloc(a->nodes, sizeof(Node*) * a->capacity);
 	}
-	l->nodes[l->count++] = n;
+	a->nodes[a->count++] = n;
 }
 
 /* Allocate and initialize a node with its type. */
@@ -393,16 +445,20 @@ Node *createProgramNode(void) {
 }
 
 /* Create a block node. */
-Node *createBlockNode(NodeList l) {
+Node *createBlockNode(NodeArray a, Token *start, Token *end) {
 	Node *n = createNode(NODE_BLOCK);
-	n->block = l;
+	n->block.elemArray = a;
+	n->block.start = start;
+	n->block.end = end;
 	return n;
 }
 
 /* Create an array node. */
-Node *createArrayNode(NodeList elem) {
+Node *createArrayNode(NodeArray a, Token *start, Token *end) {
 	Node *n = createNode(NODE_ARRAY);
-	n->array = elem;
+	n->array.elemArray = a;
+	n->array.start = start;
+	n->array.end = end;
 	return n;
 }
 
@@ -415,7 +471,7 @@ Node *createKeyvalueNode(Node *key, Node *value) {
 }
 
 /* Create a literal node. */
-Node *createLiteralNode(Token token) {
+Node *createLiteralNode(Token *token) {
 	Node *n = createNode(NODE_LITERAL);
 	n->literal = token;
 	return n;
@@ -428,14 +484,14 @@ void freeNode(Node *n) {
 	switch (n->type) {
 	case NODE_PROGRAM:
 	case NODE_BLOCK:
-		for (int i = 0; i < n->block.count; i++)
-			freeNode(n->block.nodes[i]);
-		free(n->block.nodes);
+		for (int i = 0; i < n->block.elemArray.count; i++)
+			freeNode(n->block.elemArray.nodes[i]);
+		free(n->block.elemArray.nodes);
 		break;
 	case NODE_ARRAY:
-		for (int i = 0; i < n->array.count; i++)
-			freeNode(n->array.nodes[i]);
-		free(n->array.nodes);
+		for (int i = 0; i < n->array.elemArray.count; i++)
+			freeNode(n->array.elemArray.nodes[i]);
+		free(n->array.elemArray.nodes);
 		break;
 	case NODE_KEYVALUE:
 		freeNode(n->keyvalue.key);
@@ -454,8 +510,8 @@ void freeNode(Node *n) {
 /* Represent the parser that generates the AST from the tokens using the
  * grammar rules of a language. */
 typedef struct {
-	Token curr;
-	Token prev;
+	Token* curr;
+	Token* prev;
 	bool hadErr;
 	bool panicMode;
 } Parser;
@@ -463,7 +519,9 @@ typedef struct {
 Parser parser;
 
 /* Initialize the parser. */
-void initParser(void) {
+void initParser(TokenArray *a) {
+	parser.curr = a->tokens;
+	parser.prev = a->tokens;
 	parser.hadErr    = false;
 	parser.panicMode = false;
 }
@@ -488,12 +546,22 @@ void errorAt(Token *token, const char *msg) {
 
 /* Report an error at the previous token. */
 void error(const char *msg) {
-	errorAt(&parser.prev, msg);
+	errorAt(parser.prev, msg);
 }
 
 /* Report an error at the current token. */
 void errorAtCurrent(const char *msg) {
-	errorAt(&parser.curr, msg);
+	errorAt(parser.curr, msg);
+}
+
+/* Return the current token pointend by the parser. */
+Token *peekToken(void) {
+	return parser.curr;
+}
+
+/* Return the previous token pointend by the parser. */
+Token *peekPrevToken(void) {
+	return parser.prev;
 }
 
 /* Advance to the next token. */
@@ -501,19 +569,20 @@ void advancePars(void) {
 	parser.prev = parser.curr;
 
 	while (1) {
-		parser.curr = scanToken();
-		if (parser.curr.type == TOKEN_WHITESPACE ||
-		    parser.curr.type == TOKEN_NEWLINE) continue;
+		//parser.curr = scanToken();
+		parser.curr++;
+		if (parser.curr->type == TOKEN_WHITESPACE ||
+		    parser.curr->type == TOKEN_NEWLINE) continue;
 
-		if (parser.curr.type != TOKEN_ERROR) break;
+		if (parser.curr->type != TOKEN_ERROR) break;
 
-		errorAtCurrent(parser.curr.start);
+		errorAtCurrent(parser.curr->start);
 	}
 }
 
 /* Check if the current token matches the expected type. */
 bool check(TokenType type) {
-	return parser.curr.type == type;
+	return parser.curr->type == type;
 }
 
 /* Return true if the current token matches the expected type.
@@ -529,9 +598,9 @@ bool match(TokenType type) {
 void synchronize(void) {
 	parser.panicMode = false;
 
-	while (parser.curr.type != TOKEN_EOF) {
+	while (parser.curr->type != TOKEN_EOF) {
 		/* Stop at tokens that start a new constructs. */
-		switch (parser.curr.type) {
+		switch (parser.curr->type) {
 		case TOKEN_RCURLY_BRACKET:
 		case TOKEN_RSQUARE_BRACKET:
 		case TOKEN_COMMA:
@@ -546,7 +615,7 @@ void synchronize(void) {
 /* Consume the current token and report an error if doesn't match. 
  * Returns true if consumed successfully, false otherwise. */
 bool consume(TokenType type, const char *msg) {
-	if (parser.curr.type == type) {
+	if (parser.curr->type == type) {
 		advancePars();
 		return true;
 	}
@@ -573,11 +642,18 @@ Node *parseJsonValue(void);
 
 /* Parse a JSON object: '{' (STRING ':' value (',' STRING ':' value)* )? '}' */
 Node *parseJsonObject(void) {
-	NodeList props;
-	initNodeList(&props);
+	Token *start, *end;
+
+	NodeArray props;
+	initNodeArray(&props);
+
+	start = peekToken();
+	end = NULL;
+	advancePars();
 
 	// Empty object
-	if (match(TOKEN_RCURLY_BRACKET)) return createBlockNode(props);
+	if (match(TOKEN_RCURLY_BRACKET)) 
+		return createBlockNode(props, start, end);
 
 	do {
 		if (check(TOKEN_RCURLY_BRACKET)) break;
@@ -609,16 +685,26 @@ Node *parseJsonObject(void) {
 
 	} while(match(TOKEN_COMMA));
 
-	consume(TOKEN_RCURLY_BRACKET, "Expect '}' after object properties");
-	return createBlockNode(props);
+	if (consume(TOKEN_RCURLY_BRACKET, "Expect '}' after object properties"))
+		end = peekPrevToken();
+	return createBlockNode(props, start, end);
 }
 
 /* Parse a JSON array: '[' (value (',' value)* )? ']' */
 Node *parseJsonArray(void) {
-	NodeList elem;
-	initNodeList(&elem);
+	Token *start, *end;
 
-	if (match(TOKEN_RSQUARE_BRACKET)) return createArrayNode(elem);
+	NodeArray a;
+	initNodeArray(&a);
+
+	start = peekToken();
+	end = NULL;
+	advancePars();
+
+	if (match(TOKEN_RSQUARE_BRACKET)) {
+		end = peekPrevToken();
+		return createArrayNode(a, start, end);
+	}
 
 	do {
 		if (check(TOKEN_RSQUARE_BRACKET)) break;
@@ -629,20 +715,21 @@ Node *parseJsonArray(void) {
 			continue;
 		}
 		
-		addNode(&elem, e);
+		addNode(&a, e);
 
 	} while (match(TOKEN_COMMA));
 
-	consume(TOKEN_RSQUARE_BRACKET, "Expect ']' after array elements");
-	return createArrayNode(elem);
+	if (consume(TOKEN_RSQUARE_BRACKET, "Expect ']' after array elements"))
+		end = peekPrevToken();
+	return createArrayNode(a, start, end);
 }
 
 /* Parse a JSON value: 
  * 	object | array | "true" | "false" | "null" | STRING | NUMBER */
 Node *parseJsonValue(void) {
-	if (match(TOKEN_LCURLY_BRACKET))
+	if (check(TOKEN_LCURLY_BRACKET))
 		return parseJsonObject();
-	if (match(TOKEN_LSQUARE_BRACKET))
+	if (check(TOKEN_LSQUARE_BRACKET))
 		return parseJsonArray();
 	if (match(TOKEN_TRUE) || match(TOKEN_FALSE) || match(TOKEN_NULL) ||
 	    match(TOKEN_STRING) || match(TOKEN_NUMBER)) {
@@ -658,10 +745,10 @@ Node *parseProgram(void) {
 	Node *value = parseJsonValue();
 
 	Node *prog = createProgramNode();
-	initNodeList(&prog->block);
+	initNodeArray(&prog->block.elemArray);
 
 	if (value != NULL)
-		addNode(&prog->block, value);
+		addNode(&prog->block.elemArray, value);
 
 	consume(TOKEN_EOF, "Expected end of input");
 	return prog;
@@ -670,12 +757,8 @@ Node *parseProgram(void) {
 /* Return a node that represent the root of the AST. It is generated  using 
  * the recursive discent parsing method based on the grammar of the language. 
  * For this purpose it uses the parseProgram fuction as entry point. */
-Node *parse(const char *source) {
-	initScanner(source);
-	initParser();
-
-	advancePars();
-
+Node *parse(TokenArray *tokens) {
+	initParser(tokens);
 	Node *prog = parseProgram();
 
 	return prog;
@@ -702,33 +785,41 @@ void printAST(Node *n, int depth) {
 	switch (n->type) {
 	case NODE_PROGRAM:
 		printf("PROGRAM:\n");
-		for (int i = 0; i < n->block.count; i++) {
-			printAST(n->block.nodes[i], depth+1);
+		for (int i = 0; i < n->block.elemArray.count; i++) {
+			printAST(n->block.elemArray.nodes[i], depth+1);
 		}
 		break;
 
 	case NODE_BLOCK:
-		printf("BLOCK (%d statement):\n", n->block.count);
-		for (int i = 0; i < n->block.count; i++) {
-			printAST(n->block.nodes[i], depth+1);
+		printf("BLOCK (%d statement): ", n->block.elemArray.count);
+		if (n->block.start) printToken(*n->block.start);
+		for (int i = 0; i < n->block.elemArray.count; i++) {
+			printAST(n->block.elemArray.nodes[i], depth+1);
+		}
+		if (n->block.end) {
+			printIndent(depth);
+		       	printToken(*n->block.end);
 		}
 		break;
 	case NODE_ARRAY:
-		printf("ARRAY (%d elements):\n", n->array.count);
-		for (int i = 0; i < n->array.count; i++) {
-			printAST(n->array.nodes[i], depth+1);
+		printf("ARRAY (%d elements): ", n->array.elemArray.count);
+		if (n->array.start) printToken(*n->array.start);
+		for (int i = 0; i < n->array.elemArray.count; i++) {
+			printAST(n->array.elemArray.nodes[i], depth+1);
+		}
+		if (n->array.end) {
+			printIndent(depth);
+		       	printToken(*n->array.end);
 		}
 		break;
-
 	case NODE_KEYVALUE:
 		printf("KEYVALUE:\n");
 		printAST(n->keyvalue.key, depth+1);
 		printAST(n->keyvalue.value, depth+1);
 		break;
-
 	case NODE_LITERAL:
 		printf("LITERAL: ");
-		printToken(n->literal);
+		printToken(*n->literal);
 		break;
 	default:
 		printf("UNKNOWN NODE TYPE:\n");
@@ -747,14 +838,19 @@ int main(void) {
 	char buf[1024];
 	if (fgets(buf, sizeof(buf), stdin) == NULL) return 1;
 
-	Node *ast = parse(buf);
+	initScanner(buf);
+	TokenArray tokens = scanTokens();
+	printTokens(&tokens);
+
+	Node *ast = parse(&tokens);
 
 	if (ast == NULL) return 1;
-
 	printf("\n\n");
 
 	printAST(ast, 0);
+
 	freeNode(ast);
+	free(tokens.tokens);
 
 	printf("\n\n");
 
