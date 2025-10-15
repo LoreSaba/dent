@@ -120,7 +120,7 @@ void initTokenArray(TokenArray *a) {
 	a->tokens = malloc(sizeof(Token) * a->capacity);
 }
 
-/* Add a token t into token list l. */
+/* Add a token t into token array a. */
 void addToken(TokenArray *a, Token t) {
 	if (a->count >= a->capacity) {
 		a->capacity *= 2;
@@ -365,8 +365,6 @@ void printTokens(TokenArray *a) {
 
 /* Represent a concept in the most of programming languages. */
 typedef enum {
-	NODE_UNKNOWN,
-
 	NODE_PROGRAM,
 
 	NODE_BLOCK,
@@ -385,34 +383,42 @@ typedef struct {
 	Node **nodes;
 } NodeArray;
 
-
-typedef struct {
-	NodeArray elemArray;
-	Token *start;
-	Token *end;
-} Array;
-
-typedef struct {
-	NodeArray elemArray;
-	Token *start;
-	Token *end;
-} Block;
-
 typedef struct {
 	Node  *key;
 	Node  *value;	
 } KeyValue;
+
+/* Represent a token's role within a node. Classify how each token 
+ * contributes to a syntax of a constuct. */
+typedef enum {
+	TOKEN_ROLE_DELIMITER_OPEN,	// { [ (
+	TOKEN_ROLE_DELIMITER_CLOSE,	// } ] )
+	TOKEN_ROLE_SEPARATOR,		// , ;
+	TOKEN_ROLE_OPERATOR,		// : =
+	TOKEN_ROLE_KEYWORD,
+	TOKEN_ROLE_CONTENT		// child node
+} TokenRole;
+
+/* Dynamic array of tokens annotated with its syntatic role. */
+typedef struct {
+	int count;
+	int capacity;
+	Token **tokens;
+	TokenRole *roles;
+} TokenRoleArray;
 
 /* Represent a single node of the AST. */
 struct Node {
 	NodeType type;
 
 	union {
-		Block     block;
-		Array     array;
+		NodeArray block;
+		NodeArray array;
 		KeyValue  keyvalue;
 		Token     *literal;
 	};
+
+	TokenRoleArray allTokens;	
 };
 
 /* Initialize and allocate memory for the dinamic array of nodes. */
@@ -422,7 +428,7 @@ void initNodeArray(NodeArray *a) {
 	a->nodes = malloc(sizeof(Node*) * a->capacity);
 }
 
-/* Add a node n into node list l. */
+/* Add a node n into node array a. */
 void addNode(NodeArray *a, Node *n) {
 	if (a->count >= a->capacity) {
 		a->capacity *= 2;
@@ -431,34 +437,51 @@ void addNode(NodeArray *a, Node *n) {
 	a->nodes[a->count++] = n;
 }
 
+/* Initialize and allocate memory for the dinamic array of token role. */
+void initTokenRoleArray(TokenRoleArray *a) {
+	a->count = 0;
+	a->capacity = 8;
+	a->tokens = malloc(sizeof(Token*) * a->capacity);
+	a->roles  = malloc(sizeof(TokenRole) * a->capacity);
+}
+
+/* Add a token t and role r into the array a. */
+void addTokenRole(TokenRoleArray *a, Token *t, TokenRole r) {
+	if (a->count >= a->capacity) {
+		a->capacity *= 2;
+		a->tokens = realloc(a->tokens, sizeof(Token*) * a->capacity);
+		a->roles = realloc(a->roles, sizeof(TokenRole) * a->capacity);
+	}
+	a->tokens[a->count] = t;
+	a->roles[a->count] = r;
+	a->count++;
+}
 /* Allocate and initialize a node with its type. */
 Node *createNode(NodeType type) {
 	Node *n = malloc(sizeof(Node));
 	n->type = type;
+	initTokenRoleArray(&n->allTokens);
 	return n;
 }
 
 /* Create a program node. */
 Node *createProgramNode(void) {
 	Node *n = createNode(NODE_PROGRAM);
+	initNodeArray(&n->block);
 	return n;
 }
 
 /* Create a block node. */
-Node *createBlockNode(NodeArray a, Token *start, Token *end) {
+Node *createBlockNode(void) {
 	Node *n = createNode(NODE_BLOCK);
-	n->block.elemArray = a;
-	n->block.start = start;
-	n->block.end = end;
+	initNodeArray(&n->block);
 	return n;
 }
 
 /* Create an array node. */
-Node *createArrayNode(NodeArray a, Token *start, Token *end) {
+Node *createArrayNode(void) {
 	Node *n = createNode(NODE_ARRAY);
-	n->array.elemArray = a;
-	n->array.start = start;
-	n->array.end = end;
+	initNodeArray(&n->array);
 	return n;
 }
 
@@ -484,14 +507,14 @@ void freeNode(Node *n) {
 	switch (n->type) {
 	case NODE_PROGRAM:
 	case NODE_BLOCK:
-		for (int i = 0; i < n->block.elemArray.count; i++)
-			freeNode(n->block.elemArray.nodes[i]);
-		free(n->block.elemArray.nodes);
+		for (int i = 0; i < n->block.count; i++)
+			freeNode(n->block.nodes[i]);
+		free(n->block.nodes);
 		break;
 	case NODE_ARRAY:
-		for (int i = 0; i < n->array.elemArray.count; i++)
-			freeNode(n->array.elemArray.nodes[i]);
-		free(n->array.elemArray.nodes);
+		for (int i = 0; i < n->array.count; i++)
+			freeNode(n->array.nodes[i]);
+		free(n->array.nodes);
 		break;
 	case NODE_KEYVALUE:
 		freeNode(n->keyvalue.key);
@@ -501,6 +524,9 @@ void freeNode(Node *n) {
 	default:
 		break;
 	}
+
+	free(n->allTokens.tokens);
+	free(n->allTokens.roles);
 	free(n);
 }
 
@@ -569,7 +595,6 @@ void advancePars(void) {
 	parser.prev = parser.curr;
 
 	while (1) {
-		//parser.curr = scanToken();
 		parser.curr++;
 		if (parser.curr->type == TOKEN_WHITESPACE ||
 		    parser.curr->type == TOKEN_NEWLINE) continue;
@@ -640,20 +665,21 @@ bool consume(TokenType type, const char *msg) {
 
 Node *parseJsonValue(void);
 
-/* Parse a JSON object: '{' (STRING ':' value (',' STRING ':' value)* )? '}' */
+/* Parse a JSON object.
+ * object	 '{' (STRING ':' value (',' STRING ':' value)* )? '}' */
 Node *parseJsonObject(void) {
-	Token *start, *end;
+	Node *obj = createBlockNode();
 
-	NodeArray props;
-	initNodeArray(&props);
-
-	start = peekToken();
-	end = NULL;
-	advancePars();
+	Token *openBrace = parser.prev;
+	addTokenRole(&obj->allTokens, openBrace, TOKEN_ROLE_DELIMITER_OPEN);
 
 	// Empty object
-	if (match(TOKEN_RCURLY_BRACKET)) 
-		return createBlockNode(props, start, end);
+	if (match(TOKEN_RCURLY_BRACKET)) {
+		Token *closeBrace = parser.prev;
+		addTokenRole(&obj->allTokens, closeBrace, 
+			     TOKEN_ROLE_DELIMITER_CLOSE);
+		return obj;
+	}
 
 	do {
 		if (check(TOKEN_RCURLY_BRACKET)) break;
@@ -664,7 +690,9 @@ Node *parseJsonObject(void) {
 			continue;
 		}
 
+		// Parse key value
 		Node *key = createLiteralNode(parser.curr);
+		Token *keyToken = parser.curr;
 		advancePars();
 
 		if (!consume(TOKEN_COLON, "Expect ':' after property name")) {
@@ -673,6 +701,9 @@ Node *parseJsonObject(void) {
 			continue;
 		}
 
+		Token *colonToken = parser.prev;
+		Token *valueToken = parser.curr;
+
 		Node *value = parseJsonValue();
 		if (value == NULL) {
 			freeNode(key);
@@ -680,56 +711,88 @@ Node *parseJsonObject(void) {
 			continue;
 		}
 
-		Node *p = createKeyvalueNode(key, value);
-		addNode(&props, p);
+
+		Node *kv = createKeyvalueNode(key, value);
+		addTokenRole(&kv->allTokens, keyToken, 
+			     TOKEN_ROLE_CONTENT);
+		addTokenRole(&kv->allTokens, colonToken, 
+			     TOKEN_ROLE_OPERATOR);
+		addTokenRole(&kv->allTokens, valueToken, 
+			     TOKEN_ROLE_CONTENT);
+
+		addNode(&obj->block, kv);
+		addTokenRole(&obj->allTokens, keyToken, 
+			     TOKEN_ROLE_CONTENT);
+
+		if (check(TOKEN_COMMA)) {
+			addTokenRole(&obj->allTokens, parser.curr, 
+				     TOKEN_ROLE_SEPARATOR);
+		}
 
 	} while(match(TOKEN_COMMA));
 
-	if (consume(TOKEN_RCURLY_BRACKET, "Expect '}' after object properties"))
-		end = peekPrevToken();
-	return createBlockNode(props, start, end);
+	if (consume(TOKEN_RCURLY_BRACKET, 
+	    "Expect '}' after object properties")) {
+		addTokenRole(&obj->allTokens, parser.prev, 
+			     TOKEN_ROLE_DELIMITER_CLOSE);
+	}
+	return obj;
 }
 
-/* Parse a JSON array: '[' (value (',' value)* )? ']' */
+/* Parse a JSON array.
+ * array	'[' (value (',' value)* )? ']' */
 Node *parseJsonArray(void) {
-	Token *start, *end;
+	Node *arr = createArrayNode();
 
-	NodeArray a;
-	initNodeArray(&a);
+	Token *openBracket = parser.prev;
+	addTokenRole(&arr->allTokens, openBracket, 
+		     TOKEN_ROLE_DELIMITER_OPEN);
 
-	start = peekToken();
-	end = NULL;
-	advancePars();
-
+	// Empty array
 	if (match(TOKEN_RSQUARE_BRACKET)) {
-		end = peekPrevToken();
-		return createArrayNode(a, start, end);
+		Token *closeBracket = parser.prev;
+		addTokenRole(&arr->allTokens, closeBracket, 
+			     TOKEN_ROLE_DELIMITER_CLOSE);
+		return arr;
 	}
 
 	do {
 		if (check(TOKEN_RSQUARE_BRACKET)) break;
 
-		Node *e = parseJsonValue();	
+		Token *elemToken = parser.curr;
+		Node *e = parseJsonValue();
 		if (e == NULL) {
 			synchronize();
 			continue;
 		}
-		
-		addNode(&a, e);
+
+		addNode(&arr->array, e);
+		addTokenRole(&arr->allTokens, elemToken, 
+			     TOKEN_ROLE_CONTENT);
+
+		if (check(TOKEN_COMMA)) {
+			addTokenRole(&arr->allTokens, parser.curr, 
+				     TOKEN_ROLE_SEPARATOR);
+		}
+
 
 	} while (match(TOKEN_COMMA));
 
-	if (consume(TOKEN_RSQUARE_BRACKET, "Expect ']' after array elements"))
-		end = peekPrevToken();
-	return createArrayNode(a, start, end);
+	if (consume(TOKEN_RSQUARE_BRACKET, 
+	    "Expect ']' after array elements")) {
+		addTokenRole(&arr->allTokens, parser.prev, 
+			     TOKEN_ROLE_DELIMITER_CLOSE);
+	}
+
+	return arr;
 }
 
-/* Parse a JSON value: 
- * 	object | array | "true" | "false" | "null" | STRING | NUMBER */
+/* Parse a JSON value.
+ * value 	object | array | "true" | "false" | "null" | STRING | NUMBER */
 Node *parseJsonValue(void) {
-	if (check(TOKEN_LCURLY_BRACKET))
+	if (match(TOKEN_LCURLY_BRACKET))
 		return parseJsonObject();
-	if (check(TOKEN_LSQUARE_BRACKET))
+	if (match(TOKEN_LSQUARE_BRACKET))
 		return parseJsonArray();
 	if (match(TOKEN_TRUE) || match(TOKEN_FALSE) || match(TOKEN_NULL) ||
 	    match(TOKEN_STRING) || match(TOKEN_NUMBER)) {
@@ -740,28 +803,37 @@ Node *parseJsonValue(void) {
 	return NULL;
 }
 
-/* Parse a json program: value EOF */
+/* Parse a json program.
+ * program	value EOF */
 Node *parseProgram(void) {
+	Node *prog = createProgramNode();
+	
+	Token *valueToken = parser.curr;
 	Node *value = parseJsonValue();
 
-	Node *prog = createProgramNode();
-	initNodeArray(&prog->block.elemArray);
+	if (value != NULL) { 
+		addNode(&prog->block, value);
+		addTokenRole(&prog->allTokens, valueToken, 
+			     TOKEN_ROLE_CONTENT);
+	}
 
-	if (value != NULL)
-		addNode(&prog->block.elemArray, value);
-
-	consume(TOKEN_EOF, "Expected end of input");
+	if (consume(TOKEN_EOF, "Expected end of input")) {
+		addTokenRole(&prog->allTokens, parser.prev, 
+			     TOKEN_ROLE_DELIMITER_CLOSE);
+	}
 	return prog;
 }
 
 /* Return a node that represent the root of the AST. It is generated  using 
  * the recursive discent parsing method based on the grammar of the language. 
  * For this purpose it uses the parseProgram fuction as entry point. */
-Node *parse(TokenArray *tokens) {
-	initParser(tokens);
-	Node *prog = parseProgram();
+Node *parse(void) {
+	// Skip the whitespaces
+	while (check(TOKEN_WHITESPACE) || check(TOKEN_NEWLINE)) {
+		advancePars();
+	}
 
-	return prog;
+	return parseProgram();
 }
 
 /* ========== AST Printing ========== */
@@ -785,31 +857,21 @@ void printAST(Node *n, int depth) {
 	switch (n->type) {
 	case NODE_PROGRAM:
 		printf("PROGRAM:\n");
-		for (int i = 0; i < n->block.elemArray.count; i++) {
-			printAST(n->block.elemArray.nodes[i], depth+1);
+		for (int i = 0; i < n->block.count; i++) {
+			printAST(n->block.nodes[i], depth+1);
 		}
 		break;
 
 	case NODE_BLOCK:
-		printf("BLOCK (%d statement): ", n->block.elemArray.count);
-		if (n->block.start) printToken(*n->block.start);
-		for (int i = 0; i < n->block.elemArray.count; i++) {
-			printAST(n->block.elemArray.nodes[i], depth+1);
-		}
-		if (n->block.end) {
-			printIndent(depth);
-		       	printToken(*n->block.end);
+		printf("BLOCK (%d statement):\n", n->block.count);
+		for (int i = 0; i < n->block.count; i++) {
+			printAST(n->block.nodes[i], depth+1);
 		}
 		break;
 	case NODE_ARRAY:
-		printf("ARRAY (%d elements): ", n->array.elemArray.count);
-		if (n->array.start) printToken(*n->array.start);
-		for (int i = 0; i < n->array.elemArray.count; i++) {
-			printAST(n->array.elemArray.nodes[i], depth+1);
-		}
-		if (n->array.end) {
-			printIndent(depth);
-		       	printToken(*n->array.end);
+		printf("ARRAY (%d elements):\n", n->array.count);
+		for (int i = 0; i < n->array.count; i++) {
+			printAST(n->array.nodes[i], depth+1);
 		}
 		break;
 	case NODE_KEYVALUE:
@@ -828,35 +890,276 @@ void printAST(Node *n, int depth) {
 }
 
 
-/* ========== Formatting ========== */
+/* ========== String Builder ========== */
+/* Represent a dynamic string buffer. */
+typedef struct {
+	int count;
+	int capacity;
+	char *buffer;
+} StringBuilder;
 
+void initStringBuilder(StringBuilder *sb) {
+	sb->capacity = 1024;
+	sb->count = 0;
+	sb->buffer = malloc(sb->capacity);
+	sb->buffer[0] = '\0';
+}
+
+/* Append the text of lenght len to the string builder sb. */
+void appendString(StringBuilder *sb, const char *text, int len) {
+	if (text == NULL || len == 0) return;
+
+	if (sb->count + len + 1 > sb->capacity) {
+		while (sb->count + len + 1 > sb->capacity)
+			sb->capacity *= 2;
+		sb->buffer = realloc(sb->buffer, sb->capacity);
+		if (sb->buffer == NULL) {
+			fprintf(stderr, "Failed to reallocate memory for string builder.\n");
+			exit(1);
+		}
+	}
+	memcpy(sb->buffer + sb->count, text, len);
+	sb->count += len;
+	sb->buffer[sb->count] = '\0';
+}
+
+
+/* ========== Formatting Rules ========== */
+
+/* Represent all available formatting types. */
+typedef enum {
+	RULE_INDENT
+} RuleType;
+
+typedef struct {
+	int tabSize;	// number of spaces per indent 
+			// default = 8
+	int tabNum;	// number of tabs per indent 
+			// default = 1
+	bool useTabs;	// true for tabs, false for space 
+			// default = true
+	bool addLine;	// true for add a new line before indenting 
+			// default = true
+} IndentOpt;
+
+/* Represent a single formatting rule. */
+typedef struct {
+	RuleType type;
+	NodeType *ctxs;	// elements where the rule applies
+	//*conds	   conditions defining when the rule applies
+	
+	union {		// options that control formatting behavior
+		IndentOpt indentOpt;
+	};
+} Rule;
+
+/* Represent a dynamic array of rules. */
+typedef struct {
+	int count;
+	int capacity;
+	Rule *rules;
+} RuleArray;
+
+
+/* Initialize and allocate memory for the dinamic array of rules. */
+void initRuleArray(RuleArray *a) {
+	a->count = 0;
+	a->capacity = 8;
+	a->rules = malloc(sizeof(Rule) * a->capacity);
+}
+
+/* Add a rule r into rule array a. */
+void addRule(RuleArray *a, Rule r) {
+	if (a->count >= a->capacity) {
+		a->capacity *= 2;
+		a->rules = realloc(a->rules, sizeof(Rule) * a->capacity);
+	}
+	a->rules[a->count++] = r;
+}
+
+/* Indent a node using the provided options. */
+void indent(Node *n, IndentOpt *opt) {
+	
+}
+
+
+/* ========== Formatter ========== */
+
+/* Represent the entity that produces the formatted text, appling the user rulesto the AST nodes. */
+typedef struct {
+	RuleArray *ruleArray;	// formatting rules
+	const char *lastPos;	// last source position we output
+	StringBuilder output;	// formatted source produced
+	// Indent state
+	int indentLevel;
+} Formatter;
+
+Formatter formatter;
+
+/* Initialize the formatter with an array of rules. */
+void initFormatter(RuleArray *a, const char *source) {
+	formatter.ruleArray = a;
+	formatter.lastPos = source;
+	initStringBuilder(&formatter.output);
+
+	// Init the state
+	formatter.indentLevel = 0;
+}
+
+/* Free the memory userd for allocate the formatter. */
+void freeFormatter(void) {
+	free(formatter.output.buffer);
+}
+
+/* Apply the formatting rules to node n. */
+void applyRules(Node *n) {
+	int rcount = formatter.ruleArray->count;
+	for (int i = 0; i < rcount; i++) {
+		/* Check if the node match the condition rules. */
+		// ...
+
+		Rule *r = &formatter.ruleArray->rules[i];
+		switch (r->type) {
+		case RULE_INDENT:
+			indent(n, &r->indentOpt);
+			break;
+		default:
+			break;
+		}
+	}
+}
+
+/* Produce the formatted output traversing the AST and appling the provided 
+ * rules.*/
+void format(Node *n) {
+	if (n == NULL) return;
+	
+	// Loop all the tokens in the node
+	for (int i = 0; i < n->allTokens.count; i++) {	
+		Token *t = n->allTokens.tokens[i];
+
+		// Apply the formatting rules
+		// applyRules(n);
+
+		// Output the whitespaces before the token
+		int len = (int)(t->start - formatter.lastPos);
+		appendString(&formatter.output, formatter.lastPos, len);
+		formatter.lastPos = t->start;
+		
+		if (n->allTokens.roles[i] == TOKEN_ROLE_CONTENT) {
+			// Format the child nodes
+
+			// Get the i-th child of the node 
+			// using pointer arithmetic
+			Node *childPtr = n + sizeof(NodeType) 
+				         + i * sizeof(Node*);
+			format(childPtr);
+		} else {
+			// Output the token
+			appendString(&formatter.output, 
+				     t->start,
+		    		     t->len); 
+			formatter.lastPos = t->start + t->len;
+		}
+	}
+
+	if (n->type == NODE_LITERAL) {
+		appendString(&formatter.output, 
+			     n->literal->start,
+			     n->literal->len);
+	}
+
+	
+#if 0
+	/* Explore the child nodes. */
+	switch (n->type) {
+	case NODE_PROGRAM:
+		for (int i = 0; i < n->block.count; i++) {
+			format(n->block.nodes[i]);
+		}
+		break;
+	case NODE_BLOCK:
+		formatter.indentLevel++;
+
+		for (int i = 0; i < n->block.count; i++) {
+			format(n->block.nodes[i]);
+		}
+
+		formatter.indentLevel--;
+		break;
+	case NODE_ARRAY:
+		formatter.indentLevel++;
+
+		for (int i = 0; i < n->array.count; i++) {
+			format(n->array.nodes[i]);
+		}
+
+		formatter.indentLevel--;
+		break;
+	case NODE_KEYVALUE:
+		format(n->keyvalue.key);
+		format(n->keyvalue.value);
+		break;
+	case NODE_LITERAL:
+		appendString(&formatter.output, 
+			     n->literal->start,
+			     n->literal->len);
+		break;
+	default:
+		break;
+	}	
+#endif
+}
 
 
 /* ========== Main ========== */
 
 int main(void) {
+	// Get the user source file
 	char buf[1024];
 	if (fgets(buf, sizeof(buf), stdin) == NULL) return 1;
 
+	// Get the user rules
+	RuleArray rules;
+	initRuleArray(&rules);	
+
+	// Scan the source and produce tokens
 	initScanner(buf);
 	TokenArray tokens = scanTokens();
 	printTokens(&tokens);
 
-	Node *ast = parse(&tokens);
+	// Parse the tokens
+	initParser(&tokens);
+	Node *ast = parse();
 
-	if (ast == NULL) return 1;
+	if (ast == NULL) {
+		free(tokens.tokens);
+		free(rules.rules);
+		return 1;
+	}
+
 	printf("\n\n");
-
 	printAST(ast, 0);
 
+	if (parser.hadErr) {
+		fprintf(stderr, "Warning: Parsing compleated with errors."
+			        " AST may be incompleate.\n");
+	}
+
+	// Format
+	initFormatter(&rules, buf);
+	format(ast);
+
+	// Print the formatted output
+	printf("\n=== Formatted Output ===\n");
+	printf("%s", formatter.output.buffer);
+	printf("\n========================\n");
+
+	// Free the allocated memory
 	freeNode(ast);
 	free(tokens.tokens);
-
-	printf("\n\n");
-
-	if (parser.hadErr) {
-		fprintf(stderr, "Warning: Parsing compleated with errors. AST may be incompleate.\n");
-	}
+	free(rules.rules);
+	freeFormatter();
 
 	return 0;
 }
