@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define TAB_SIZE 8
+
 /* Rapresent all the possible type of tokens. */
 typedef enum {
 	TOKEN_LCURLY_BRACKET, TOKEN_RCURLY_BRACKET, 
@@ -693,6 +695,8 @@ Node *parseJsonObject(void) {
 		// Parse key value
 		Node *key = createLiteralNode(parser.curr);
 		Token *keyToken = parser.curr;
+		addTokenRole(&key->allTokens, keyToken, 
+			     TOKEN_ROLE_CONTENT);
 		advancePars();
 
 		if (!consume(TOKEN_COLON, "Expect ':' after property name")) {
@@ -796,7 +800,10 @@ Node *parseJsonValue(void) {
 		return parseJsonArray();
 	if (match(TOKEN_TRUE) || match(TOKEN_FALSE) || match(TOKEN_NULL) ||
 	    match(TOKEN_STRING) || match(TOKEN_NUMBER)) {
-		return createLiteralNode(parser.prev);
+		Node *lit = createLiteralNode(parser.prev);
+		addTokenRole(&lit->allTokens, parser.prev, 
+			     TOKEN_ROLE_CONTENT);
+		return lit;
 	}
 
 	error("Expect value");
@@ -809,7 +816,7 @@ Node *parseProgram(void) {
 	Node *prog = createProgramNode();
 	
 	Token *valueToken = parser.curr;
-	Node *value = parseJsonValue();
+	Node  *value      = parseJsonValue();
 
 	if (value != NULL) { 
 		addNode(&prog->block, value);
@@ -932,7 +939,13 @@ typedef enum {
 } RuleType;
 
 typedef struct {
-	int tabSize;	// number of spaces per indent 
+	int count;
+	int capacity;
+	NodeType *contexts;
+} ContextArray;
+
+typedef struct {
+	int tabSize;	// number of spaces per tab
 			// default = 8
 	int tabNum;	// number of tabs per indent 
 			// default = 1
@@ -940,12 +953,14 @@ typedef struct {
 			// default = true
 	bool addLine;	// true for add a new line before indenting 
 			// default = true
+	bool useLevel;	// true for enable the formatting level
+			// default = true
 } IndentOpt;
 
 /* Represent a single formatting rule. */
 typedef struct {
 	RuleType type;
-	NodeType *ctxs;	// elements where the rule applies
+	ContextArray ctxArray;	// elements where the rule applies
 	//*conds	   conditions defining when the rule applies
 	
 	union {		// options that control formatting behavior
@@ -959,7 +974,6 @@ typedef struct {
 	int capacity;
 	Rule *rules;
 } RuleArray;
-
 
 /* Initialize and allocate memory for the dinamic array of rules. */
 void initRuleArray(RuleArray *a) {
@@ -977,9 +991,50 @@ void addRule(RuleArray *a, Rule r) {
 	a->rules[a->count++] = r;
 }
 
-/* Indent a node using the provided options. */
-void indent(Node *n, IndentOpt *opt) {
-	
+/* Initialize and allocate memory for the dinamic array of contexts. */
+void initContextArray(ContextArray *a) {
+	a->count = 0;
+	a->capacity = 8;
+	a->contexts = malloc(sizeof(NodeType) * a->capacity);
+}
+
+/* Add a context ctx into contexts array a. */
+void addContext(ContextArray *a, NodeType ctx) {
+	if (a->count >= a->capacity) {
+		a->capacity *= 2;
+		a->contexts = realloc(a->contexts, sizeof(NodeType) * a->capacity);
+	}
+	a->contexts[a->count++] = ctx;
+}
+
+/* Initialize a rule with its type. */
+Rule createRule(RuleType type) {
+	Rule rule;
+	rule.type = type;
+	initContextArray(&rule.ctxArray);
+	return rule;
+}
+
+/* Create an indent rule. */
+Rule createIndentRule(void) {
+	Rule rule = createRule(RULE_INDENT);
+	rule.indentOpt.tabSize  = 8;
+	rule.indentOpt.tabNum   = 1;
+	rule.indentOpt.useTabs  = true;
+	rule.indentOpt.addLine  = true;
+	rule.indentOpt.useLevel = true;
+	return rule;
+}
+
+void freeRule(Rule *rule) {
+	free(rule->ctxArray.contexts);
+}
+
+void freeRuleArray(RuleArray *a) {
+	for (int i = 0; i < a->count; i++) {
+		freeRule(&a->rules[i]);
+	}
+	free(a);
 }
 
 
@@ -990,8 +1045,9 @@ typedef struct {
 	RuleArray *ruleArray;	// formatting rules
 	const char *lastPos;	// last source position we output
 	StringBuilder output;	// formatted source produced
-	// Indent state
-	int indentLevel;
+	// State
+	int indentLevel;	// indentation level
+	int colNum;		// number of column
 } Formatter;
 
 Formatter formatter;
@@ -1004,6 +1060,7 @@ void initFormatter(RuleArray *a, const char *source) {
 
 	// Init the state
 	formatter.indentLevel = 0;
+	formatter.colNum      = 0;
 }
 
 /* Free the memory userd for allocate the formatter. */
@@ -1011,104 +1068,199 @@ void freeFormatter(void) {
 	free(formatter.output.buffer);
 }
 
-/* Apply the formatting rules to node n. */
-void applyRules(Node *n) {
-	int rcount = formatter.ruleArray->count;
-	for (int i = 0; i < rcount; i++) {
-		/* Check if the node match the condition rules. */
-		// ...
+/* Output the string s with lenght len provided as input. 
+ * Then update the formatter state. */
+void outputString(const char *s, int len) {
+	if (s == NULL || len <= 0) return;
 
-		Rule *r = &formatter.ruleArray->rules[i];
-		switch (r->type) {
+	for (int i = 0; i < len; i++) {
+		if (s[i] == '\n') {
+			formatter.colNum = 1;
+		} else if (s[i] == '\t') {
+			// Calculate the spaces needed to get to the next
+			// tab stop
+			int blanks = TAB_SIZE - ((formatter.colNum - 1) %
+						 TAB_SIZE);
+			formatter.colNum += blanks;
+		} else {
+			formatter.colNum++;
+		}
+	}
+
+	appendString(&formatter.output, s, len);
+	formatter.lastPos = s + len;
+}
+
+/* Output the text between start and end. */
+void outputGap(const char *start, const char *end) {
+	if (start >= end) return;
+	int len = (int)(end - start);
+	outputString(start, len);
+}
+
+/* Output an indentation with the provided options. 
+ * The indentation is computed considering the tab stop. */
+void indent(IndentOpt *opt) {
+	// colNum is the number of the last output character
+	int currCol = formatter.colNum + 1;
+	int level   = opt->useLevel ? formatter.indentLevel : 1;
+
+	// Calculate maximum possible size for the buffer
+	int maxSize = opt->addLine + 
+		      level * opt->tabNum * opt->tabSize + 1;
+	char buf[maxSize];
+	char *c = buf;
+
+	if (opt->addLine) {
+		*c = '\n';
+		c++;
+		currCol = 1;
+	} 
+
+	for (int i = 0; i < opt->tabNum * level; i++) {
+		if (opt->tabSize == 0) break;
+		int tabWidth  = opt->tabSize - 
+				((currCol - 1) % opt->tabSize);
+		int tabCol = currCol + tabWidth;
+		// Use tabs to get as close as possible to the tab 
+		// column
+		if (opt->useTabs) {
+			while (1) {
+				// Calculate where I land if I put a tab
+				int dist = TAB_SIZE - 
+					   ((currCol - 1) % TAB_SIZE);
+				int tabStop = currCol + dist;
+				if (tabStop <= tabCol) {
+					*c = '\t';
+					c++;
+					currCol = tabStop;
+				} else {
+					break;
+				}
+			}
+		}
+
+		// Use spaces to fill the remaining distance
+		while (currCol < tabCol) {
+			*c = ' ';
+			c++;
+			currCol++;
+		}
+	}
+
+	outputString(buf, c - buf);
+}
+
+/* Return true if the rule conditions match the node, false otherwise. */
+bool matchCondRule(Rule *rule, Node *n) {
+	// Check the context
+	bool match = false;
+	for (int i = 0; i < rule->ctxArray.count; i++) {
+		if (n->type == rule->ctxArray.contexts[i]) {
+			match = true;
+			break;
+		}
+	}
+
+	if (!match) return false;
+	return true;
+}
+
+/* Apply the before formatting rules to node n. */
+void applyBeforeRules2Node(Node *n) {
+	Token *t = n->allTokens.tokens[0]; // first token of the node
+	bool applied = false;
+
+	// Loop all the rules
+	for (int i = 0; i < formatter.ruleArray->count; i++) {
+		Rule *rule = &formatter.ruleArray->rules[i];
+		// Check if the node matches the condition rules
+		if (!matchCondRule(rule, n)) {
+			continue;
+		}
+
+		switch (rule->type) {
 		case RULE_INDENT:
-			indent(n, &r->indentOpt);
+			indent(&rule->indentOpt);
+			applied = true;
 			break;
 		default:
 			break;
 		}
 	}
+
+	// If none of the rules matches, output the whitespaces before 
+	// the first token of the node
+	if (!applied) {
+		outputGap(formatter.lastPos, t->start);
+	} else {
+		formatter.lastPos = t->start;
+	}
 }
 
-/* Produce the formatted output traversing the AST and appling the provided 
- * rules.*/
-void format(Node *n) {
+/* Produce the formatted output traversing the AST and appling the formatting 
+ * rules. */
+void formatNode(Node *n) {
 	if (n == NULL) return;
 	
 	// Loop all the tokens in the node
-	for (int i = 0; i < n->allTokens.count; i++) {	
-		Token *t = n->allTokens.tokens[i];
-
-		// Apply the formatting rules
-		// applyRules(n);
-
-		// Output the whitespaces before the token
-		int len = (int)(t->start - formatter.lastPos);
-		appendString(&formatter.output, formatter.lastPos, len);
-		formatter.lastPos = t->start;
-		
-		if (n->allTokens.roles[i] == TOKEN_ROLE_CONTENT) {
-			// Format the child nodes
-
-			// Get the i-th child of the node 
-			// using pointer arithmetic
-			Node *childPtr = n + sizeof(NodeType) 
-				         + i * sizeof(Node*);
-			format(childPtr);
-		} else {
-			// Output the token
-			appendString(&formatter.output, 
-				     t->start,
-		    		     t->len); 
-			formatter.lastPos = t->start + t->len;
-		}
-	}
-
-	if (n->type == NODE_LITERAL) {
-		appendString(&formatter.output, 
-			     n->literal->start,
-			     n->literal->len);
-	}
-
+	int nodeIdx = 0;
+	for (int i = 0; i < n->allTokens.count; i++) {
+		Token *t    = n->allTokens.tokens[i];
+		TokenRole r = n->allTokens.roles[i];
 	
-#if 0
-	/* Explore the child nodes. */
-	switch (n->type) {
-	case NODE_PROGRAM:
-		for (int i = 0; i < n->block.count; i++) {
-			format(n->block.nodes[i]);
+		/* Format the child nodes following this steps:
+		 * - Update the formatter state.
+		 * - Apply the "before" formatting rules.
+		 * - Reursively format the child nodes.
+		 * - Apply the "after" formatting rules.
+		 * - Restore the formatter state.
+		 * */
+		if (r == TOKEN_ROLE_CONTENT) {
+			Node *child = NULL;
+			switch (n->type) {
+			case NODE_PROGRAM:
+				child = n->block.nodes[nodeIdx];
+				applyBeforeRules2Node(child); 
+				formatNode(child);
+				break;
+			case NODE_BLOCK:
+				formatter.indentLevel++;
+				child = n->block.nodes[nodeIdx];
+				applyBeforeRules2Node(child); 
+				formatNode(child);
+				formatter.indentLevel--;
+				break;
+			case NODE_ARRAY:
+				formatter.indentLevel++;
+				child = n->array.nodes[nodeIdx];
+				applyBeforeRules2Node(child); 
+				formatNode(child);
+				formatter.indentLevel--;
+				break;
+			case NODE_KEYVALUE:
+				child = (nodeIdx == 0) ? 
+						n->keyvalue.key :
+						n->keyvalue.value;
+				applyBeforeRules2Node(child); 
+				formatNode(child);
+				break;
+			case NODE_LITERAL:
+				outputString(n->literal->start,
+					   n->literal->len);
+				break;
+			default:
+				break;
+			}	
+
+			nodeIdx++;
+		} else { // Output the token
+			/* Apply the "before" formatting rules. */
+			 // apply the formatting to the token
+			 //applyBeforeRules2Token(NULL); 
+			outputString(t->start, t->len);
 		}
-		break;
-	case NODE_BLOCK:
-		formatter.indentLevel++;
-
-		for (int i = 0; i < n->block.count; i++) {
-			format(n->block.nodes[i]);
-		}
-
-		formatter.indentLevel--;
-		break;
-	case NODE_ARRAY:
-		formatter.indentLevel++;
-
-		for (int i = 0; i < n->array.count; i++) {
-			format(n->array.nodes[i]);
-		}
-
-		formatter.indentLevel--;
-		break;
-	case NODE_KEYVALUE:
-		format(n->keyvalue.key);
-		format(n->keyvalue.value);
-		break;
-	case NODE_LITERAL:
-		appendString(&formatter.output, 
-			     n->literal->start,
-			     n->literal->len);
-		break;
-	default:
-		break;
-	}	
-#endif
+	}
 }
 
 
@@ -1147,8 +1299,16 @@ int main(void) {
 	}
 
 	// Format
+	Rule rule = createIndentRule();
+	rule.indentOpt.tabSize  = 4;
+	rule.indentOpt.tabNum   = 1;
+	rule.indentOpt.addLine  = true;
+	rule.indentOpt.useTabs  = true;
+	addContext(&rule.ctxArray, NODE_KEYVALUE);
+	addRule(&rules, rule);
+
 	initFormatter(&rules, buf);
-	format(ast);
+	formatNode(ast);
 
 	// Print the formatted output
 	printf("\n=== Formatted Output ===\n");
